@@ -70,14 +70,18 @@ public:
     ansistr_binary_ = false;
     register_types_ = false;
     constprefix_ = false;
+    old_names_ = false;
     events_ = false;
     xmldoc_ = false;
     async_ = false;
+    com_types_ = false;
     for( iter = parsed_options.begin(); iter != parsed_options.end(); ++iter) {
       if( iter->first.compare("ansistr_binary") == 0) {
         ansistr_binary_ = true;
       } else if( iter->first.compare("register_types") == 0) {
         register_types_ = true;
+      } else if( iter->first.compare("old_names") == 0) {
+        old_names_ = true;
       } else if( iter->first.compare("constprefix") == 0) {
         constprefix_ = true;
       } else if( iter->first.compare("events") == 0) {
@@ -86,9 +90,15 @@ public:
         xmldoc_ = true;
       } else if( iter->first.compare("async") == 0) {
         async_ = true;
+      } else if( iter->first.compare("com_types") == 0) {
+        com_types_ = true;
       } else {
         throw "unknown option delphi:" + iter->first;
       }
+    }
+
+    if(com_types_ && ansistr_binary_) {
+      throw "com_types and ansistr_binary are mutually exclusive";
     }
 
     out_dir_base_ = "gen-delphi";
@@ -98,6 +108,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   void generate_consts(std::vector<t_const*> consts) override;
 
@@ -345,8 +356,8 @@ public:
   std::string argument_list(t_struct* tstruct);
   std::string constructor_argument_list(t_struct* tstruct, std::string current_indent);
   std::string type_to_enum(t_type* ttype);
-  std::string prop_name(t_field* tfield, bool is_xception = false);
-  std::string prop_name(std::string name, bool is_xception = false);
+  std::string prop_name(t_field* tfield, bool is_xception = false, std::string prefix = "");
+  std::string prop_name(std::string name, bool is_xception = false, std::string prefix = "");
   std::string constructor_param_name(string name);
 
   void write_enum(std::string line);
@@ -394,7 +405,8 @@ private:
   bool has_enum;
   bool has_const;
   std::string namespace_dir_;
-  std::map<std::string, int> delphi_keywords;
+  std::map<std::string, int> delphi_keywords;  // TODO: put all into one map, value=flags tells what it is
+  std::map<std::string, int> delphi_reserved_names;
   std::map<std::string, int> delphi_reserved_method;
   std::map<std::string, int> delphi_reserved_method_exception;
   std::map<std::string, int> types_known;
@@ -404,7 +416,8 @@ private:
   bool find_keyword(std::map<std::string, int>& keyword_map, std::string name);
   std::string normalize_name(std::string name,
                              bool b_method = false,
-                             bool b_exception_method = false);
+                             bool b_exception_method = false,
+                             bool b_force_underscore = false);
   std::string empty_value(t_type* type);
   bool is_fully_defined_type(t_type* ttype);
   void add_defined_type(t_type* ttype);
@@ -414,9 +427,11 @@ private:
   bool ansistr_binary_;
   bool register_types_;
   bool constprefix_;
+  bool old_names_;
   bool events_;
   bool xmldoc_;
   bool async_;
+  bool com_types_;
   void indent_up_impl() { ++indent_impl_; };
   void indent_down_impl() { --indent_impl_; };
   std::string indent_impl() {
@@ -557,24 +572,35 @@ bool t_delphi_generator::find_keyword(std::map<std::string, int>& keyword_map, s
 
 std::string t_delphi_generator::normalize_name(std::string name,
                                                bool b_method,
-                                               bool b_exception_method) {
+                                               bool b_exception_method,
+                                               bool b_force_underscore) {
   string tmp(name);
   std::transform(tmp.begin(), tmp.end(), tmp.begin(), static_cast<int (*)(int)>(std::tolower));
 
-  bool b_found = false;
+  bool b_reserved = false;
+  bool b_keyword = false;
 
   if (find_keyword(delphi_keywords, tmp)) {
-    b_found = true;
+    b_keyword = true;
+  } else if (find_keyword(delphi_reserved_names, tmp)) {
+    b_reserved = true;
   } else if (b_method && find_keyword(delphi_reserved_method, tmp)) {
-    b_found = true;
+    b_reserved = true;
   } else if (b_exception_method && find_keyword(delphi_reserved_method_exception, tmp)) {
-    b_found = true;
+    b_reserved = true;
   }
 
-  if (b_found) {
+  // neither reserved nor keyword?
+  if (!(b_reserved || b_keyword)) {  
+    return name;
+  }
+  
+  // apply the rule: old style '_' postfix or more modern '&' prefix?
+  // underscore always on non-keywords or when explicitly asked via arg
+  if( (!b_keyword) || old_names_ || b_force_underscore) {
     return name + "_";
   } else {
-    return name;
+    return "&" + name;
   }
 }
 
@@ -652,15 +678,7 @@ void t_delphi_generator::create_keywords() {
   delphi_keywords["at"] = 1;
   delphi_keywords["on"] = 1;
 
-  // reserved/predefined variables and types (lowercase!)
-  delphi_keywords["result"] = 1;
-  delphi_keywords["system"] = 1;
-  delphi_keywords["sysutils"] = 1;
-  delphi_keywords["thrift"] = 1;
-  delphi_keywords["tbytes"] = 1;
-  delphi_keywords["tobject"] = 1;
-  delphi_keywords["tclass"] = 1;
-  delphi_keywords["tinterfacedobject"] = 1;
+  // predefined types (lowercase!)
   delphi_keywords["ansistring"] = 1;
   delphi_keywords["string"] = 1;
   delphi_keywords["boolean"] = 1;
@@ -670,6 +688,17 @@ void t_delphi_generator::create_keywords() {
   delphi_keywords["int64"] = 1;
   delphi_keywords["double"] = 1;
 
+  // reserved variables and types (lowercase!)
+  delphi_reserved_names["result"] = 1;
+  delphi_reserved_names["system"] = 1;
+  delphi_reserved_names["sysutils"] = 1;
+  delphi_reserved_names["thrift"] = 1;
+  delphi_reserved_names["tbytes"] = 1;
+  delphi_reserved_names["tobject"] = 1;
+  delphi_reserved_names["tclass"] = 1;
+  delphi_reserved_names["tinterfacedobject"] = 1;
+
+  // reserved method names (lowercase!)
   delphi_reserved_method["create"] = 1;
   delphi_reserved_method["free"] = 1;
   delphi_reserved_method["initinstance"] = 1;
@@ -773,7 +802,7 @@ void t_delphi_generator::init_generator() {
     unitname = include->get_name();
     nsname = include->get_namespace("delphi");
     if ("" != nsname) {
-      unitname = normalize_name(nsname);
+      unitname = normalize_name(nsname,false,false,true/*force underscore*/);
     }
     add_delphi_uses_list(unitname);
   }
@@ -793,7 +822,7 @@ void t_delphi_generator::close_generator() {
     }
   }
 
-  unitname = normalize_name(unitname);
+  unitname = normalize_name(unitname,false,false,true/*force underscore*/);
   
   std::string f_name = get_out_dir() + "/" + unitname + ".pas";
   ofstream_with_content_based_conditional_update f_all;
@@ -804,6 +833,9 @@ void t_delphi_generator::close_generator() {
   generate_delphi_doc(f_all, program_);
   f_all << "unit " << unitname << ";" << endl << endl;
   f_all << "{$WARN SYMBOL_DEPRECATED OFF}" << endl << endl;
+  if(com_types_) {
+    f_all << "{$MINENUMSIZE 4}" << endl << endl;
+  }
   f_all << "interface" << endl << endl;
   f_all << "uses" << endl;
 
@@ -831,18 +863,14 @@ void t_delphi_generator::close_generator() {
 
   f_all << "const" << endl;
   indent_up();
-  indent(f_all) << "c" << tmp_unit
-                << "_Option_AnsiStr_Binary = " << (ansistr_binary_ ? "True" : "False") << ";"
-                << endl;
-  indent(f_all) << "c" << tmp_unit
-                << "_Option_Register_Types = " << (register_types_ ? "True" : "False") << ";"
-                << endl;
-  indent(f_all) << "c" << tmp_unit
-                << "_Option_ConstPrefix    = " << (constprefix_ ? "True" : "False") << ";" << endl;
-  indent(f_all) << "c" << tmp_unit << "_Option_Events         = " << (events_ ? "True" : "False")
-                << ";" << endl;
-  indent(f_all) << "c" << tmp_unit << "_Option_XmlDoc         = " << (xmldoc_ ? "True" : "False")
-                << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_AnsiStr_Binary = " << (ansistr_binary_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_Register_Types = " << (register_types_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_ConstPrefix    = " << (constprefix_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_Events         = " << (events_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_XmlDoc         = " << (xmldoc_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_Async          = " << (async_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_COM_types      = " << (com_types_ ? "True" : "False") << ";" << endl;
+  indent(f_all) << "c" << tmp_unit << "_Option_Old_Names      = " << (old_names_ ? "True" : "False") << ";" << endl;
   indent_down();
 
   f_all << endl;
@@ -920,7 +948,7 @@ void t_delphi_generator::delphi_type_usings(ostream& out) {
 void t_delphi_generator::generate_forward_declaration(t_struct* tstruct) {
   // Forward declare struct def
   has_forward = true;
-  pverbose("forward declaration of %s\n", type_name(tstruct).c_str());
+  pdebug("forward declaration of %s\n", type_name(tstruct).c_str());
 
   string what = tstruct->is_xception() ? "class" : "interface";
 
@@ -1018,6 +1046,7 @@ void t_delphi_generator::init_known_types_list() {
   // known base types
   types_known[type_name(g_type_string)] = 1;
   types_known[type_name(g_type_binary)] = 1;
+  types_known[type_name(g_type_uuid)] = 1;
   types_known[type_name(g_type_bool)] = 1;
   types_known[type_name(g_type_i8)] = 1;
   types_known[type_name(g_type_i16)] = 1;
@@ -1156,7 +1185,7 @@ void t_delphi_generator::generate_consts(std::vector<t_const*> consts) {
   for (c_iter = consts.begin(); c_iter != consts.end(); ++c_iter) {
     initialize_field(vars,
                      code,
-                     "F" + prop_name((*c_iter)->get_name()),
+                     prop_name((*c_iter)->get_name(), false, "F"),
                      (*c_iter)->get_type(),
                      (*c_iter)->get_value());
   }
@@ -1200,7 +1229,7 @@ void t_delphi_generator::generate_consts(std::vector<t_const*> consts) {
     if (const_needs_var((*c_iter)->get_type())) {
       initialize_field(vars,
                        code,
-                       constants_class + ".F" + prop_name((*c_iter)->get_name()),
+                       constants_class + "." + prop_name((*c_iter)->get_name(), false, "F"),
                        (*c_iter)->get_type(),
                        (*c_iter)->get_value());
     }
@@ -1392,6 +1421,9 @@ string t_delphi_generator::render_const_value(ostream& vars,
     case t_base_type::TYPE_STRING:
       render << "'" << get_escaped_string(value) << "'";
       break;
+    case t_base_type::TYPE_UUID:
+      render << "['{" << value->get_uuid() << "}']";
+      break;
     case t_base_type::TYPE_BOOL:
       render << ((value->get_integer() > 0) ? "True" : "False");
       break;
@@ -1493,11 +1525,11 @@ void t_delphi_generator::generate_delphi_struct_impl(ostream& out,
     if ((*m_iter)->get_value() != nullptr) {
       initialize_field(vars,
                        code,
-                       "F" + prop_name((*m_iter)->get_name(), is_exception),
+                       prop_name((*m_iter)->get_name(), is_exception, ""),
                        t,
                        (*m_iter)->get_value());
       if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-        indent_impl(code) << "F__isset_" << prop_name((*m_iter), is_exception) << " := True;"
+        indent_impl(code) << prop_name((*m_iter), is_exception, "F__isset_") << " := True;"
                           << endl;
       }
     }
@@ -1777,7 +1809,7 @@ void t_delphi_generator::generate_delphi_struct_definition(ostream& out,
       out << endl;
       for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
         if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-          isset_name = "__isset_" + prop_name(*m_iter, is_exception);
+          isset_name = prop_name(*m_iter, is_exception, "__isset_");
           indent(out) << "property " << isset_name << ": System.Boolean read Get" << isset_name << " write Set" << isset_name << ";"
                       << endl;
         }
@@ -1826,7 +1858,7 @@ void t_delphi_generator::generate_delphi_struct_definition(ostream& out,
     indent(out) << endl;
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
       if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-        isset_name = "F__isset_" + prop_name(*m_iter, is_exception);
+        isset_name = prop_name(*m_iter, is_exception, "F__isset_");
         indent(out) << isset_name << ": System.Boolean;" << endl;
       }
     }
@@ -1849,7 +1881,7 @@ void t_delphi_generator::generate_delphi_struct_definition(ostream& out,
     out << endl;
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
       if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-        isset_name = "__isset_" + prop_name(*m_iter, is_exception);
+        isset_name = prop_name(*m_iter, is_exception, "__isset_");
         indent(out) << "function Get" << isset_name << ": System.Boolean;" << endl;
         indent(out) << "procedure Set" << isset_name << "( const value : System.Boolean);" << endl;
       }
@@ -1914,7 +1946,7 @@ void t_delphi_generator::generate_delphi_struct_definition(ostream& out,
     indent(out) << "// isset" << endl;
     for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
       if ((*m_iter)->get_req() != t_field::T_REQUIRED) {
-        isset_name = "__isset_" + prop_name(*m_iter, is_exception);
+        isset_name = prop_name(*m_iter, is_exception, "__isset_");
         indent(out) << "property " << isset_name << ": System.Boolean read Get" << isset_name << " write Set" << isset_name << ";"
                     << endl;
       }
@@ -1986,7 +2018,7 @@ void t_delphi_generator::generate_guid(std::ostream& out) {
 #ifdef _WIN32   // TODO: add support for non-windows platforms if needed
   GUID guid;
   if (SUCCEEDED(CoCreateGuid(&guid))) {
-    OLECHAR guid_chars[40];
+    OLECHAR guid_chars[40]{};
     if (StringFromGUID2(guid, &guid_chars[0], sizeof(guid_chars) / sizeof(guid_chars[0])) > 0) {
       std::wstring guid_wstr(guid_chars);
       std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> convert;
@@ -2272,7 +2304,7 @@ void t_delphi_generator::generate_service_client(t_service* tservice) {
 
       vector<t_field*>::const_iterator x_iter;
       for (x_iter = xceptions.begin(); x_iter != xceptions.end(); ++x_iter) {
-        indent_impl(s_service_impl) << "if (" << retvar << ".__isset_" << prop_name(*x_iter)
+        indent_impl(s_service_impl) << "if (" << retvar << "." << prop_name(*x_iter, false, "__isset_")
                                     << ") then begin" << endl;
         indent_up_impl();
         indent_impl(s_service_impl) << exceptvar << " := " << retvar << "." << prop_name(*x_iter)
@@ -2697,11 +2729,14 @@ void t_delphi_generator::generate_deserialize_field(ostream& out,
           if (ansistr_binary_) {
             out << "ReadAnsiString();";
           } else {
-            out << "ReadBinary();";
+            out << (com_types_ ? "ReadBinaryCOM();" :  "ReadBinary();");
           }
         } else {
           out << "ReadString();";
         }
+        break;
+      case t_base_type::TYPE_UUID:
+        out << "ReadUuid();";
         break;
       case t_base_type::TYPE_BOOL:
         out << "ReadBool();";
@@ -2904,6 +2939,9 @@ void t_delphi_generator::generate_serialize_field(ostream& out,
         }
         out << name << ");";
         break;
+      case t_base_type::TYPE_UUID:
+        out << "WriteUuid(" << name << ");";
+        break;
       case t_base_type::TYPE_BOOL:
         out << "WriteBool(" << name << ");";
         break;
@@ -3061,26 +3099,26 @@ void t_delphi_generator::generate_delphi_property(ostream& out,
   bool is_xception = ftype->is_xception();
   generate_delphi_doc(out, tfield);
   indent(out) << "property " << prop_name(tfield, struct_is_xception) << ": "
-              << type_name(ftype, false, true, is_xception, true) << " read "
-              << fieldPrefix + prop_name(tfield, struct_is_xception) << " write Set"
-              << prop_name(tfield, struct_is_xception) << ";" << endl;
+              << type_name(ftype, false, true, is_xception, true) 
+              << " read " << prop_name(tfield, struct_is_xception, fieldPrefix) 
+              << " write " << prop_name(tfield, struct_is_xception, "Set") 
+              << ";" << endl;
 }
 
-std::string t_delphi_generator::prop_name(t_field* tfield, bool is_xception) {
-  return prop_name(tfield->get_name(), is_xception);
+std::string t_delphi_generator::prop_name(t_field* tfield, bool is_xception, std::string prefix) {
+  return prop_name(tfield->get_name(), is_xception, prefix);
 }
 
-std::string t_delphi_generator::prop_name(string name, bool is_xception) {
+std::string t_delphi_generator::prop_name(string name, bool is_xception, std::string prefix) {
   string ret = name;
   ret[0] = toupper(ret[0]);
-  return normalize_name(ret, true, is_xception);
+  return normalize_name(prefix + ret, true, is_xception);
 }
 
 std::string t_delphi_generator::constructor_param_name(string name) {
   string ret = name;
   ret[0] = toupper(ret[0]);
-  ret = "A" + ret;
-  return normalize_name(ret, false, false);
+  return normalize_name("a" + ret, false, false);
 }
 
 string t_delphi_generator::normalize_clsnm(string clsnm, string prefix, bool b_no_check_keyword) {
@@ -3138,9 +3176,9 @@ string t_delphi_generator::type_name(t_type* ttype,
   } else if (ttype->is_set()) {
     t_set* tset = (t_set*)ttype;
     if (b_cls) {
-      typ_nm = "THashSetImpl";
+      typ_nm = "TThriftHashSetImpl";
     } else {
-      typ_nm = "IHashSet";
+      typ_nm = "IThriftHashSet";
     }
     return typ_nm + "<" + type_name(tset->get_elem_type()) + ">";
   } else if (ttype->is_list()) {
@@ -3189,6 +3227,7 @@ string t_delphi_generator::input_arg_prefix(t_type* ttype) {
 
     // these should be const'ed for optimal performamce
     case t_base_type::TYPE_STRING: // refcounted pointer
+    case t_base_type::TYPE_UUID:   // refcounted pointer
     case t_base_type::TYPE_I64:    // larger than 32 bit
     case t_base_type::TYPE_DOUBLE: // larger than 32 bit
       return "const ";
@@ -3236,11 +3275,13 @@ string t_delphi_generator::base_type_name(t_base_type* tbase) {
       if (ansistr_binary_) {
         return "System.AnsiString";
       } else {
-        return "SysUtils.TBytes";
+        return com_types_ ? "IThriftBytes" : "SysUtils.TBytes";
       }
     } else {
-      return "System.string";
+      return com_types_ ? "System.WideString" : "System.string";
     }
+  case t_base_type::TYPE_UUID:
+    return "System.TGuid";
   case t_base_type::TYPE_BOOL:
     return "System.Boolean";
   case t_base_type::TYPE_I8:
@@ -3268,7 +3309,7 @@ string t_delphi_generator::declare_field(t_field* tfield,
   t_type* ftype = tfield->get_type();
   bool is_xception = ftype->is_xception();
 
-  string result = prefix + prop_name(tfield, is_xception_class) + ": "
+  string result = prop_name(tfield, is_xception_class, prefix) + ": "
                   + type_name(ftype, false, true, is_xception, true) + ";";
   return result;
 }
@@ -3310,11 +3351,11 @@ string t_delphi_generator::function_signature(t_function* tfunction,
   // deprecated method? only at intf decl!
   if( full_cls == "") {
     auto iter = tfunction->annotations_.find("deprecated");
-    if( tfunction->annotations_.end() != iter) {
+    if( tfunction->annotations_.end() != iter && !iter->second.empty()) {
       signature += " deprecated";
       // empty annotation values end up with "1" somewhere, ignore these as well
-      if ((iter->second.length() > 0) && (iter->second != "1")) {
-        signature += " " + make_pascal_string_literal(iter->second);
+      if ((iter->second.back().length() > 0) && (iter->second.back() != "1")) {
+        signature += " " + make_pascal_string_literal(iter->second.back());
       }
       signature += ";";
     }
@@ -3407,6 +3448,8 @@ string t_delphi_generator::type_to_enum(t_type* type) {
       throw "NO T_VOID CONSTRUCT";
     case t_base_type::TYPE_STRING:
       return "TType.String_";
+    case t_base_type::TYPE_UUID:
+      return "TType.Uuid";
     case t_base_type::TYPE_BOOL:
       return "TType.Bool_";
     case t_base_type::TYPE_I8:
@@ -3455,6 +3498,8 @@ string t_delphi_generator::empty_value(t_type* type) {
       } else {
         return "''";
       }
+    case t_base_type::TYPE_UUID:
+      return "System.TGuid.Empty";
     case t_base_type::TYPE_BOOL:
       return "False";
     case t_base_type::TYPE_I8:
@@ -3486,7 +3531,7 @@ void t_delphi_generator::generate_delphi_property_writer_definition(ostream& out
   t_type* ftype = tfield->get_type();
   bool is_xception = ftype->is_xception();
 
-  indent(out) << "procedure Set" << prop_name(tfield, is_xception_class)
+  indent(out) << "procedure " << prop_name(tfield, is_xception_class, "Set")
               << "( const Value: " << type_name(ftype, false, true, is_xception, true) << ");"
               << endl;
 }
@@ -3497,15 +3542,15 @@ void t_delphi_generator::generate_delphi_property_reader_definition(ostream& out
   t_type* ftype = tfield->get_type();
   bool is_xception = ftype->is_xception();
 
-  indent(out) << "function Get" << prop_name(tfield, is_xception_class) << ": "
+  indent(out) << "function " << prop_name(tfield, is_xception_class, "Get") << ": "
               << type_name(ftype, false, true, is_xception, true) << ";" << endl;
 }
 
 void t_delphi_generator::generate_delphi_isset_reader_writer_definition(ostream& out,
                                                                  t_field* tfield,
                                                                  bool is_xception) {
-  indent(out) << "function Get__isset_" << prop_name(tfield, is_xception) << ": System.Boolean;" << endl;
-  indent(out) << "procedure Set__isset_" << prop_name(tfield, is_xception) << "( const value : System.Boolean);" << endl;
+  indent(out) << "function " << prop_name(tfield, is_xception,"Get__isset_") << ": System.Boolean;" << endl;
+  indent(out) << "procedure " << prop_name(tfield, is_xception, "Set__isset_") << "( const value : System.Boolean);" << endl;
 }
 
 void t_delphi_generator::generate_delphi_clear_union_value(ostream& out,
@@ -3528,11 +3573,11 @@ void t_delphi_generator::generate_delphi_clear_union_value(ostream& out,
   t_type* ftype = tfield->get_type();
   bool is_xception = ftype->is_xception();
 
-  indent_impl(out) << "if F__isset_" << prop_name(tfield, is_xception_class) << " then begin"
+  indent_impl(out) << "if " << prop_name(tfield, is_xception_class,"F__isset_") << " then begin"
                    << endl;
   indent_up_impl();
-  indent_impl(out) << "F__isset_" << prop_name(tfield, is_xception_class) << " := False;" << endl;
-  indent_impl(out) << fieldPrefix << prop_name(tfield, is_xception_class) << " := "
+  indent_impl(out) << prop_name(tfield, is_xception_class,"F__isset_") << " := False;" << endl;
+  indent_impl(out) << prop_name(tfield, is_xception_class,fieldPrefix) << " := "
                    << "Default( " << type_name(ftype, false, true, is_xception, true) << ");"
                    << endl;
   indent_down_impl();
@@ -3555,7 +3600,7 @@ void t_delphi_generator::generate_delphi_property_writer_impl(ostream& out,
   bool is_xception = ftype->is_xception();
 
   indent_impl(out) << "procedure " << cls_prefix << name << "."
-                   << "Set" << prop_name(tfield, is_xception_class)
+                   << prop_name(tfield, is_xception_class,"Set")
                    << "( const Value: " << type_name(ftype, false, true, is_xception, true) << ");"
                    << endl;
   indent_impl(out) << "begin" << endl;
@@ -3564,9 +3609,9 @@ void t_delphi_generator::generate_delphi_property_writer_impl(ostream& out,
     indent_impl(out) << "ClearUnionValues;" << endl;
   }
   if (tfield->get_req() != t_field::T_REQUIRED) {
-    indent_impl(out) << "F__isset_" << prop_name(tfield, is_xception_class) << " := True;" << endl;
+    indent_impl(out) << prop_name(tfield, is_xception_class,"F__isset_") << " := True;" << endl;
   }
-  indent_impl(out) << fieldPrefix << prop_name(tfield, is_xception_class) << " := Value;" << endl;
+  indent_impl(out) << prop_name(tfield, is_xception_class,fieldPrefix) << " := Value;" << endl;
 
   if (is_xception_class && (!is_xception_factory)) {
     indent_impl(out) << xception_factory_name << "." << prop_name(tfield, is_xception_class)
@@ -3590,11 +3635,11 @@ void t_delphi_generator::generate_delphi_property_reader_impl(ostream& out,
   bool is_xception = ftype->is_xception();
 
   indent_impl(out) << "function " << cls_prefix << name << "."
-                   << "Get" << prop_name(tfield, is_xception_class) << ": "
+                   << prop_name(tfield, is_xception_class,"Get") << ": "
                    << type_name(ftype, false, true, is_xception, true) << ";" << endl;
   indent_impl(out) << "begin" << endl;
   indent_up_impl();
-  indent_impl(out) << "Result := " << fieldPrefix << prop_name(tfield, is_xception_class) << ";"
+  indent_impl(out) << "Result := " << prop_name(tfield, is_xception_class,fieldPrefix) << ";"
                    << endl;
   indent_down_impl();
   indent_impl(out) << "end;" << endl << endl;
@@ -3609,7 +3654,7 @@ void t_delphi_generator::generate_delphi_isset_reader_writer_impl(ostream& out,
                                                            bool is_xception) {
   (void)type;
 
-  string isset_name = "__isset_" + prop_name(tfield, is_xception);
+  string isset_name = prop_name(tfield, is_xception, "__isset_");
   
   indent_impl(out) << "function " << cls_prefix << name << "."
                    << "Get" << isset_name << ": System.Boolean;" << endl;
@@ -3655,7 +3700,7 @@ void t_delphi_generator::generate_delphi_create_exception_impl(ostream& out,
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
     propname = prop_name(*f_iter, is_exception);
     if ((*f_iter)->get_req() != t_field::T_REQUIRED) {
-      indent_impl(out) << "if __isset_" << propname << " then begin" << endl;
+      indent_impl(out) << "if " << prop_name(*f_iter, is_exception,"__isset_") << " then begin" << endl;
       indent_up_impl();
     }
     indent_impl(out) << "Result." << propname << " := " << propname << ";" << endl;
@@ -3692,9 +3737,9 @@ void t_delphi_generator::generate_delphi_struct_reader_impl(ostream& out,
   // local bools for required fields
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
     if ((*f_iter)->get_req() == t_field::T_REQUIRED) {
-      indent_impl(local_vars) << "_req_isset_" << prop_name(*f_iter, is_exception) << " : System.Boolean;"
+      indent_impl(local_vars) << prop_name(*f_iter, is_exception,"_req_isset_") << " : System.Boolean;"
                               << endl;
-      indent_impl(code_block) << "_req_isset_" << prop_name(*f_iter, is_exception) << " := FALSE;"
+      indent_impl(code_block) << prop_name(*f_iter, is_exception,"_req_isset_") << " := FALSE;"
                               << endl;
     }
   }
@@ -3736,7 +3781,7 @@ void t_delphi_generator::generate_delphi_struct_reader_impl(ostream& out,
 
     // required field?
     if ((*f_iter)->get_req() == t_field::T_REQUIRED) {
-      indent_impl(code_block) << "_req_isset_" << prop_name(*f_iter, is_exception) << " := TRUE;"
+      indent_impl(code_block) << prop_name(*f_iter, is_exception,"_req_isset_") << " := TRUE;"
                               << endl;
     }
 
@@ -3786,7 +3831,7 @@ void t_delphi_generator::generate_delphi_struct_reader_impl(ostream& out,
         code_block << endl;
         first = false;
       }
-      indent_impl(code_block) << "if not _req_isset_" << prop_name(*f_iter, is_exception) << endl;
+      indent_impl(code_block) << "if not " << prop_name(*f_iter, is_exception,"_req_isset_") << endl;
       indent_impl(code_block)
           << "then raise TProtocolExceptionInvalidData.Create("
           << "'required field " << prop_name(*f_iter, is_exception) << " not set');"
@@ -3841,7 +3886,7 @@ void t_delphi_generator::generate_delphi_struct_result_writer_impl(ostream& out,
   if (fields.size() > 0) {
     indent_impl(code_block) << "Thrift.Protocol.Init( field_);" << endl;
     for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-      indent_impl(code_block) << "if (__isset_" << prop_name(*f_iter, is_exception) << ") then"
+      indent_impl(code_block) << "if (" << prop_name(*f_iter, is_exception,"__isset_") << ") then"
                               << endl;
       indent_impl(code_block) << "begin" << endl;
       indent_up_impl();
@@ -3909,6 +3954,7 @@ void t_delphi_generator::generate_delphi_struct_writer_impl(ostream& out,
 
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
     string fieldname = prop_name((*f_iter), is_exception);
+    string isset_name = prop_name((*f_iter), is_exception, "__isset_");
     bool null_allowed = type_can_be_null((*f_iter)->get_type());
     bool is_required = ((*f_iter)->get_req() == t_field::T_REQUIRED);
     bool has_isset = (!is_required);
@@ -3922,13 +3968,13 @@ void t_delphi_generator::generate_delphi_struct_writer_impl(ostream& out,
     if (null_allowed) {
       indent_impl(code_block) << "if (Self." << fieldname << " <> nil)";
       if (has_isset) {
-        code_block << " and __isset_" << fieldname;
+        code_block << " and " << isset_name;
       }
       code_block << " then begin" << endl;
       indent_up_impl();
     } else {
       if (has_isset) {
-        indent_impl(code_block) << "if (__isset_" << fieldname << ") then begin" << endl;
+        indent_impl(code_block) << "if (" << isset_name << ") then begin" << endl;
         indent_up_impl();
       }
     }
@@ -4021,13 +4067,13 @@ void t_delphi_generator::generate_delphi_struct_tostring_impl(ostream& out,
     if (null_allowed) {
       indent_impl(out) << "if (Self." << prop_name((*f_iter), is_exception) << " <> nil)";
       if (is_optional) {
-        out << " and __isset_" << prop_name(*f_iter, is_exception);
+        out << " and " << prop_name(*f_iter, is_exception,"__isset_");
       }
       out << " then begin" << endl;
       indent_up_impl();
     } else {
       if (is_optional) {
-        indent_impl(out) << "if (__isset_" << prop_name(*f_iter, is_exception) << ") then begin"
+        indent_impl(out) << "if (" << prop_name(*f_iter, is_exception, "__isset_") << ") then begin"
                          << endl;
         indent_up_impl();
       }
@@ -4059,6 +4105,9 @@ void t_delphi_generator::generate_delphi_struct_tostring_impl(ostream& out,
                        << type_name(ttype, false, true, false, false) 
                        << ">.ToString( System.Ord( Self." 
                        << prop_name((*f_iter), is_exception) << ")));" << endl;
+    } else if (ttype->is_uuid()) {
+      indent_impl(out) << tmp_sb << ".Append( GUIDToString(Self." << prop_name((*f_iter), is_exception) << "));"
+                       << endl;
     } else {
       indent_impl(out) << tmp_sb << ".Append( Self." << prop_name((*f_iter), is_exception) << ");"
                        << endl;
@@ -4105,13 +4154,20 @@ bool t_delphi_generator::is_void(t_type* type) {
   return false;
 }
 
+std::string t_delphi_generator::display_name() const {
+  return "Delphi";
+}
+
+
 THRIFT_REGISTER_GENERATOR(
     delphi,
-    "delphi",
+    "Delphi",
     "    ansistr_binary:  Use AnsiString for binary datatype (default is TBytes).\n"
     "    register_types:  Enable TypeRegistry, allows for creation of struct, union\n"
     "                     and container instances by interface or TypeInfo()\n"
     "    constprefix:     Name TConstants classes after IDL to reduce ambiguities\n"
     "    events:          Enable and use processing events in the generated code.\n"
     "    xmldoc:          Enable XMLDoc comments for Help Insight etc.\n"
-    "    async:           Generate IAsync interface to use Parallel Programming Library (XE7+ only).\n")
+    "    async:           Generate IAsync interface to use Parallel Programming Library (XE7+ only).\n"
+    "    com_types:       Use COM-compatible data types (e.g. WideString).\n"
+    "    old_names:       Compatibility: generate \"reserved\" identifiers with '_' postfix instead of '&' prefix.\n")

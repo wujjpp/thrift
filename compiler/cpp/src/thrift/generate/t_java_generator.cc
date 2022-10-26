@@ -145,6 +145,7 @@ public:
 
   void init_generator() override;
   void close_generator() override;
+  std::string display_name() const override;
 
   void generate_consts(std::vector<t_const*> consts) override;
 
@@ -371,7 +372,11 @@ public:
     ttype = get_true_type(ttype);
 
     return ttype->is_container() || ttype->is_struct() || ttype->is_xception() || ttype->is_string()
-           || ttype->is_enum();
+           || ttype->is_uuid() || ttype->is_enum();
+  }
+
+  bool is_deprecated(const std::map<std::string, std::vector<std::string>>& annotations) {
+    return annotations.find("deprecated") != annotations.end();
   }
 
   bool is_deprecated(const std::map<std::string, std::string>& annotations) {
@@ -766,6 +771,9 @@ string t_java_generator::render_const_value(ostream& out, t_type* type, t_const_
       } else {
         render << '"' << get_escaped_string(value) << '"';
       }
+      break;
+    case t_base_type::TYPE_UUID:
+      render << "java.util.UUID.fromString(\"" << get_escaped_string(value) << "\")";
       break;
     case t_base_type::TYPE_BOOL:
       render << ((value->get_integer() > 0) ? "true" : "false");
@@ -1813,6 +1821,9 @@ void t_java_generator::generate_java_struct_parcelable(ostream& out, t_struct* t
         case t_base_type::TYPE_I16:
           indent(out) << "out.writeInt(new Short(" << name << ").intValue());" << endl;
           break;
+        case t_base_type::TYPE_UUID:
+          indent(out) << "out.writeUuid(" << name << ");" << endl;
+          break;
         case t_base_type::TYPE_I32:
           indent(out) << "out.writeInt(" << name << ");" << endl;
           break;
@@ -1833,6 +1844,8 @@ void t_java_generator::generate_java_struct_parcelable(ostream& out, t_struct* t
           break;
         case t_base_type::TYPE_VOID:
           break;
+        default:
+          throw "compiler error: unhandled type";
         }
       }
     }
@@ -1908,6 +1921,9 @@ void t_java_generator::generate_java_struct_parcelable(ostream& out, t_struct* t
         scope_down(out);
       } else {
         switch (bt->get_base()) {
+        case t_base_type::TYPE_I8:
+          indent(out) << prefix << " = in.readByte();" << endl;
+          break;
         case t_base_type::TYPE_I16:
           indent(out) << prefix << " = (short) in.readInt();" << endl;
           break;
@@ -1917,11 +1933,11 @@ void t_java_generator::generate_java_struct_parcelable(ostream& out, t_struct* t
         case t_base_type::TYPE_I64:
           indent(out) << prefix << " = in.readLong();" << endl;
           break;
+        case t_base_type::TYPE_UUID:
+          indent(out) << prefix << " = in.readUuid();" << endl;
+          break;
         case t_base_type::TYPE_BOOL:
           indent(out) << prefix << " = (in.readInt()==1);" << endl;
-          break;
-        case t_base_type::TYPE_I8:
-          indent(out) << prefix << " = in.readByte();" << endl;
           break;
         case t_base_type::TYPE_DOUBLE:
           indent(out) << prefix << " = in.readDouble();" << endl;
@@ -1931,6 +1947,8 @@ void t_java_generator::generate_java_struct_parcelable(ostream& out, t_struct* t
           break;
         case t_base_type::TYPE_VOID:
           break;
+        default:
+          throw "compiler error: unhandled type";
         }
       }
     }
@@ -2062,6 +2080,7 @@ void t_java_generator::generate_java_struct_equality(ostream& out, t_struct* tst
     } else if (t->is_base_type()) {
       switch (((t_base_type*)t)->get_base()) {
       case t_base_type::TYPE_STRING:
+      case t_base_type::TYPE_UUID:
         indent(out) << "hashCode = hashCode * " << MUL << " + " << name << ".hashCode();" << endl;
         break;
       case t_base_type::TYPE_BOOL:
@@ -2192,7 +2211,7 @@ void t_java_generator::generate_java_validator(ostream& out, t_struct* tstruct) 
 
   out << indent() << "// check for sub-struct validity" << endl;
   for (f_iter = fields.begin(); f_iter != fields.end(); ++f_iter) {
-    t_type* type = (*f_iter)->get_type();
+    t_type* type = get_true_type((*f_iter)->get_type());
     if (type->is_struct() && !((t_struct*)type)->is_union()) {
       out << indent() << "if (" << (*f_iter)->get_name() << " != null) {" << endl;
       out << indent() << "  " << (*f_iter)->get_name() << ".validate();" << endl;
@@ -2902,6 +2921,9 @@ std::string t_java_generator::get_java_type_string(t_type* type) {
     case t_base_type::TYPE_STRING:
       return "org.apache.thrift.protocol.TType.STRING";
       break;
+    case t_base_type::TYPE_UUID:
+      return "org.apache.thrift.protocol.TType.UUID";
+      break;
     case t_base_type::TYPE_BOOL:
       return "org.apache.thrift.protocol.TType.BOOL";
       break;
@@ -2949,7 +2971,7 @@ void t_java_generator::generate_metadata_for_field_annotations(std::ostream& out
   indent_up();
   for (auto& annotation : field->annotations_) {
     indent(out) << ".add(new java.util.AbstractMap.SimpleImmutableEntry<>(\"" + annotation.first
-                       + "\", \"" + annotation.second + "\"))"
+                       + "\", \"" + annotation.second.back() + "\"))"
                 << endl;
   }
   indent(out) << ".build().collect(java.util.stream.Collectors.toMap(java.util.Map.Entry::getKey, "
@@ -2965,7 +2987,8 @@ void t_java_generator::generate_field_value_meta_data(std::ostream& out, t_type*
   out << endl;
   indent_up();
   indent_up();
-  if (type->is_struct() || type->is_xception()) {
+  t_type* ttype = get_true_type(type);
+  if (ttype->is_struct() || ttype->is_xception()) {
     indent(out) << "new "
                    "org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType."
                    "STRUCT, "
@@ -4078,6 +4101,9 @@ void t_java_generator::generate_deserialize_field(ostream& out,
     case t_base_type::TYPE_I64:
       out << "readI64();";
       break;
+    case t_base_type::TYPE_UUID:
+      out << "readUuid();";
+      break;
     case t_base_type::TYPE_DOUBLE:
       out << "readDouble();";
       break;
@@ -4388,6 +4414,9 @@ void t_java_generator::generate_serialize_field(ostream& out,
       case t_base_type::TYPE_I64:
         out << "writeI64(" << name << ");";
         break;
+      case t_base_type::TYPE_UUID:
+        out << "writeUuid(" << name << ");";
+        break;
       case t_base_type::TYPE_DOUBLE:
         out << "writeDouble(" << name << ");";
         break;
@@ -4610,6 +4639,8 @@ string t_java_generator::base_type_name(t_base_type* type, bool in_container) {
     } else {
       return "java.lang.String";
     }
+  case t_base_type::TYPE_UUID:
+    return "java.util.UUID";
   case t_base_type::TYPE_BOOL:
     return (in_container ? "java.lang.Boolean" : "boolean");
   case t_base_type::TYPE_I8:
@@ -4651,6 +4682,7 @@ string t_java_generator::declare_field(t_field* tfield, bool init, bool comment)
       case t_base_type::TYPE_VOID:
         throw "NO T_VOID CONSTRUCT";
       case t_base_type::TYPE_STRING:
+      case t_base_type::TYPE_UUID:
         result += " = null";
         break;
       case t_base_type::TYPE_BOOL:
@@ -4665,6 +4697,8 @@ string t_java_generator::declare_field(t_field* tfield, bool init, bool comment)
       case t_base_type::TYPE_DOUBLE:
         result += " = (double)0";
         break;
+      default:
+        throw "compiler error: unhandled type";
       }
     } else if (ttype->is_enum()) {
       result += " = null";
@@ -4840,8 +4874,12 @@ string t_java_generator::type_to_enum(t_type* type) {
       return "org.apache.thrift.protocol.TType.I32";
     case t_base_type::TYPE_I64:
       return "org.apache.thrift.protocol.TType.I64";
+    case t_base_type::TYPE_UUID:
+      return "org.apache.thrift.protocol.TType.UUID";
     case t_base_type::TYPE_DOUBLE:
       return "org.apache.thrift.protocol.TType.DOUBLE";
+    default:
+      throw "compiler error: unhandled type";
     }
   } else if (type->is_enum()) {
     return "org.apache.thrift.protocol.TType.I32";
@@ -5311,12 +5349,8 @@ void t_java_generator::generate_java_struct_clear(std::ostream& out, t_struct* t
   indent(out) << java_override_annotation() << endl;
   indent(out) << "public void clear() {" << endl;
 
-  const vector<t_field*>& members = tstruct->get_members();
-  vector<t_field*>::const_iterator m_iter;
-
   indent_up();
-  for (m_iter = members.begin(); m_iter != members.end(); ++m_iter) {
-    t_field* field = *m_iter;
+  for (auto field : tstruct->get_members()) {
     t_type* t = get_true_type(field->get_type());
 
     if (field->get_value() != nullptr) {
@@ -5325,16 +5359,13 @@ void t_java_generator::generate_java_struct_clear(std::ostream& out, t_struct* t
     }
 
     if (type_can_be_null(t)) {
-
       if (reuse_objects_ && (t->is_container() || t->is_struct())) {
         indent(out) << "if (this." << field->get_name() << " != null) {" << endl;
         indent_up();
         indent(out) << "this." << field->get_name() << ".clear();" << endl;
         indent_down();
         indent(out) << "}" << endl;
-
       } else {
-
         indent(out) << "this." << field->get_name() << " = null;" << endl;
       }
       continue;
@@ -5747,33 +5778,33 @@ void t_java_generator::generate_javax_generated_annotation(ostream& out) {
   }
 }
 
+std::string t_java_generator::display_name() const {
+  return "Java";
+}
+
+
 THRIFT_REGISTER_GENERATOR(
     java,
     "Java",
     "    beans:           Members will be private, and setter methods will return void.\n"
-    "    private_members: Members will be private, but setter methods will return 'this' like "
-    "usual.\n"
+    "    private_members: Members will be private, but setter methods will return 'this' like usual.\n"
     "    private-members: Same as 'private_members' (deprecated).\n"
     "    nocamel:         Do not use CamelCase field accessors with beans.\n"
     "    fullcamel:       Convert underscored_accessor_or_service_names to camelCase.\n"
     "    android:         Generated structures are Parcelable.\n"
-    "    android_legacy:  Do not use java.io.IOException(throwable) (available for Android 2.3 and "
-    "above).\n"
+    "    android_legacy:  Do not use java.io.IOException(throwable) (available for Android 2.3 and above).\n"
     "    option_type=[thrift|jdk8]:\n"
     "                     thrift: wrap optional fields in thrift Option type.\n"
     "                     jdk8: Wrap optional fields in JDK8+ Option type.\n"
     "                     If the Option type is not specified, 'thrift' is used.\n"
     "    rethrow_unhandled_exceptions:\n"
-    "                     Enable rethrow of unhandled exceptions and let them propagate further."
-    " (Default behavior is to catch and log it.)\n"
+    "                     Enable rethrow of unhandled exceptions and let them propagate further. (Default behavior is to catch and log it.)\n"
     "    java5:           Generate Java 1.5 compliant code (includes android_legacy flag).\n"
     "    future_iface:    Generate CompletableFuture based iface based on async client.\n"
-    "    reuse_objects:   Data objects will not be allocated, but existing instances will be used "
-    "(read and write).\n"
+    "    reuse_objects:   Data objects will not be allocated, but existing instances will be used (read and write).\n"
     "    reuse-objects:   Same as 'reuse_objects' (deprecated).\n"
     "    sorted_containers:\n"
-    "                     Use TreeSet/TreeMap instead of HashSet/HashMap as a implementation of "
-    "set/map.\n"
+    "                     Use TreeSet/TreeMap instead of HashSet/HashMap as a implementation of set/map.\n"
     "    generated_annotations=[undated|suppress]:\n"
     "                     undated: suppress the date at @Generated annotations\n"
     "                     suppress: suppress @Generated annotations entirely\n"
